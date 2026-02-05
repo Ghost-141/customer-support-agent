@@ -2,11 +2,11 @@ import os
 import asyncio
 from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langchain_core.messages import AIMessage
 from psycopg_pool import AsyncConnectionPool
-from psycopg.rows import dict_row
 from dotenv import load_dotenv
 from graph_builder import build_graph
-from db import _build_db_url
+from db_pool import create_async_pool
 
 
 def _normalize_from_number(raw: str) -> str:
@@ -50,25 +50,26 @@ async def run_local_chat(graph, user_message: str, from_number: str):
     )
     # Get all messages from the result
     all_messages = result["messages"]
-    
+
     # Find the last HumanMessage (the one we just sent)
     last_human_idx = -1
     for i in range(len(all_messages) - 1, -1, -1):
         if isinstance(all_messages[i], HumanMessage):
             last_human_idx = i
             break
-            
+
     # Extract all content from AIMessages following the last HumanMessage
     new_responses = []
-    from langchain_core.messages import AIMessage
-    for msg in all_messages[last_human_idx + 1:]:
+    for msg in all_messages[last_human_idx + 1 :]:
         if isinstance(msg, AIMessage) and msg.content:
             new_responses.append(msg.content)
-            
+
     return "\n\n".join(new_responses)
 
 
-async def run_agent(user_message: str, from_number: str, pool: AsyncConnectionPool) -> str:
+async def run_agent(
+    user_message: str, from_number: str, pool: AsyncConnectionPool
+) -> str:
     async with pool.connection() as conn:
         # Handle clear command
         if user_message.strip() == "/clear":
@@ -101,18 +102,9 @@ if __name__ == "__main__":
 
     async def main_loop():
         load_dotenv()
-        conn_info = _build_db_url()
         print("Chat session started. Type '/clear' to reset conversation history.")
-        
-        async with AsyncConnectionPool(
-            conninfo=conn_info,
-            max_size=20,
-            kwargs={
-                "autocommit": True,
-                "prepare_threshold": None,
-                "row_factory": dict_row,
-            },
-        ) as pool:
+
+        async with create_async_pool() as pool:
             while True:
                 try:
                     user_input = input("User: ")
@@ -127,6 +119,7 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"Error: {e}")
                     import traceback
+
                     traceback.print_exc()
 
     # Run the async main loop

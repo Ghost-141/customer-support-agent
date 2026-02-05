@@ -15,12 +15,10 @@ class ErrorResponse(BaseModel):
 
 
 class ProductItem(BaseModel):
-    id: int | None
     title: str | None
     brand: str | None = None
     category: str | None = None
     price: float | None = None
-    rating: float | None = None
     stock: int | None = None
 
 

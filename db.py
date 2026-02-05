@@ -40,47 +40,28 @@ def search_products_hybrid(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     query_clean = query.strip()
     q = f"%{query_clean}%"
     sql = """
-    with review_agg as (
-      select product_id, avg(rating)::float as avg_rating, count(*) as review_count
-      from product_reviews
-      group by product_id
-    )
     select
-      p.id,
       p.title,
-      p.description,
+      p.brand,
       p.category,
       p.price,
-      p.rating,
       p.stock,
-      p.brand,
-      p.sku,
-      p.availability_status,
-      p.shipping_information,
-      p.return_policy,
-      coalesce(r.avg_rating, p.rating) as avg_rating,
-      coalesce(r.review_count, 0) as review_count,
       (p.title ilike %(q_exact)s) as exact_title_match,
       ts_rank_cd(
         to_tsvector(
           'english',
           coalesce(p.title, '') || ' ' ||
-          coalesce(p.description, '') || ' ' ||
           coalesce(p.category, '') || ' ' ||
           coalesce(p.brand, '') || ' ' ||
-          coalesce(p.sku, '')
         ),
         websearch_to_tsquery('english', %(q_ts)s)
       ) as keyword_rank,
       (
         p.title ilike %(q)s
-        or p.description ilike %(q)s
         or p.category ilike %(q)s
         or p.brand ilike %(q)s
-        or p.sku ilike %(q)s
       ) as keyword_match
     from products p
-    left join review_agg r on r.product_id = p.id
     order by
       exact_title_match desc,
       keyword_rank desc,

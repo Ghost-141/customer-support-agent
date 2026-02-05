@@ -36,12 +36,10 @@ def search_products(query: str) -> dict:
     for p in rows:
         items.append(
             ProductItem(
-                id=p.get("id"),
                 title=p.get("title"),
                 brand=p.get("brand"),
                 category=p.get("category"),
                 price=p.get("price"),
-                rating=p.get("avg_rating"),
                 stock=p.get("stock"),
             )
         )
