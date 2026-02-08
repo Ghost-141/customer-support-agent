@@ -63,6 +63,10 @@ class ReviewResults(BaseModel):
     items: list[ReviewItem]
 
 
+class ReviewResponse(BaseModel):
+    summary: str | None = None
+
+
 class CategoryList(BaseModel):
     type: str = "categories"
     items: list[str]

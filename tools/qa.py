@@ -5,9 +5,13 @@ from api.schemas import (
     ProductDetailItem,
     ReviewItem,
     ReviewResults,
+    ReviewResponse,
     CategoryList,
     CategoryProducts,
+    ErrorResponse,
 )
+from langchain_core.messages import HumanMessage, SystemMessage
+from utils.llm_provider import get_llm
 from data.db import (
     get_products_by_title,
     get_products_by_category,
@@ -38,6 +42,7 @@ def get_product_by_name(product_name: str) -> dict:
     for product in products:
         items.append(
             ProductDetailItem(
+                id=product.get("id"),
                 title=product.get("title"),
                 brand=product.get("brand"),
                 category=product.get("category"),
@@ -58,12 +63,34 @@ def get_product_by_name(product_name: str) -> dict:
 
 
 @tool
-def get_product_reviews(product_id: int) -> dict:
+def get_product_reviews(
+    product_name: str | None = None, product_id: int | None = None
+) -> dict:
     """Retrieve customer feedback, ratings, and sentiment for a product.
 
     Use this when the user asks "What do people think about this?", "Show me reviews for product kiwi", or "Is this product any good?".
-    Requires a numeric product ID.
+    If only a product name is provided, the tool will look up the product ID first.
     """
+    if product_id is None:
+        if not product_name:
+            return ErrorResponse(
+                message="Please provide a product name or product ID to fetch reviews."
+            ).model_dump()
+
+        products = get_products_by_title(product_name, limit=1)
+        if not products:
+            products = search_products_hybrid(product_name, limit=1)
+
+        if not products:
+            return ErrorResponse(
+                message=f"No product found matching '{product_name}'."
+            ).model_dump()
+
+        product_id = products[0].get("id")
+        if product_id is None:
+            return ErrorResponse(
+                message=f"Product '{product_name}' was found, but its ID is missing."
+            ).model_dump()
 
     rows = _get_product_reviews(product_id, limit=5)
     if not rows:
@@ -75,7 +102,36 @@ def get_product_reviews(product_id: int) -> dict:
                 comment=r.get("comment"),
             )
         )
-    return ReviewResults(product_id=product_id, items=items).model_dump()
+
+    summary = _summarize_reviews([i.comment for i in items if i.comment])
+    return ReviewResponse(summary=summary).model_dump()
+
+
+def _summarize_reviews(comments: list[str]) -> str | None:
+    if not comments:
+        return None
+
+    llm = get_llm()
+    system_prompt = (
+        "You summarize customer review comments. "
+        "Write 2-3 concise sentences about overall review summary of the product. "
+        "Use only the provided comments. No bullets."
+    )
+    human_prompt = "Reviews:\n" + "\n".join(f"- {c}" for c in comments)
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt),
+            ]
+        )
+    except Exception:
+        return None
+
+    content = getattr(response, "content", None)
+    if not content:
+        return None
+    return str(content).strip()
 
 
 @tool
