@@ -1,42 +1,44 @@
 # Support Agent
 
-A WhatsApp-style customer support agent that answers product questions using a PostgreSQL-backed catalog and a tool-augmented LLM graph.
+A WhatsApp/Telegram/WebSocket customer support agent that answers product questions using a PostgreSQL-backed catalog and a tool-augmented LLM graph.
 
 ## Highlights
-- Tool-augmented chat flow built with LangGraph and LangChain.
-- PostgreSQL product catalog with search, category browsing, and review lookup.
-- Local development loop with conversation memory persisted in Postgres.
-- Rolling summary memory to keep recent turns plus a condensed history.
-- Chroma-backed tool retrieval to bind only relevant tools per message.
-- OLLAMA-based model configuration with environment-driven settings.
+- LangGraph + LangChain orchestration with tool retrieval via Chroma.
+- PostgreSQL product catalog with category browsing and review summaries.
+- Conversation memory stored in Postgres with rolling summaries.
+- Ollama or Groq LLM provider selection via env (`LLM_PROVIDER`).
 
 ## How It Works
 - The agent runs a LangGraph state machine with preprocess, tool retrieval, optional summarization, assistant, and tool nodes.
-- The assistant uses a system prompt in `prompts.py` to decide when to call tools.
-- Tools in `tools/qa.py` query the database through `db.py`.
+- The assistant uses the system prompt in `prompts.py` to enforce tool usage and response rules.
+- Tools in `tools/qa.py` query the database via `data/db.py`.
 - Conversation state is stored in Postgres using the LangGraph Postgres checkpointer.
-- Tool retrieval uses a Chroma vector store built from tool descriptions in `tools/vectorize_tools.py`.
+- Tool retrieval uses a Chroma vector store built from tool descriptions in `tools/vectorize_tools.py` and stored in `data/chroma_db`.
 - Summarization keeps recent turns and rolls older context into a stored summary.
 
 ## Project Structure
-- `api/app.py` configures the FastAPI app and registers routers.
-- `api/routers/` contains WhatsApp, Telegram, and WebSocket endpoints.
-- `api/services/` contains messaging helpers and the WebSocket manager.
-- `agent.py` runs the agent logic and manages conversation memory.
-- `graph_builder.py` wires the LLM, tools, and graph routing.
+- `api/app.py` configures FastAPI and registers routers.
+- `api/routers/` contains `telegram.py`, `whatsapp.py`, and `websocket.py`.
+- `api/services/` contains messaging helpers, dependency wiring, and the WebSocket manager.
+- `api/schemas.py` defines LangGraph state and response models.
+- `api/uvicorn_loop.py` forces selector event loop on Windows for psycopg.
+- `agent.py` runs the agent logic and CLI loop.
+- `graph_builder.py` wires the LLM, tools, tool retrieval, and graph routing.
 - `prompts.py` contains the system prompt and tool usage rules.
 - `tools/qa.py` exposes database-backed tools to the LLM.
 - `tools/vectorize_tools.py` builds the Chroma tool-retrieval index.
-- `db.py` provides database access and helper functions.
-- `schemas.py` defines typed response models.
-- `data/products.json` is the seed dataset.
+- `data/db.py` provides database access and helpers.
+- `data/db_pool.py` builds the async Postgres pool used by the API and agent.
 - `data/load_data.py` loads or updates data into the database.
+- `data/products.json` is the seed dataset.
+- `data/chroma_db/` stores the persisted tool-retrieval index.
+- `utils/llm_provider.py` selects Ollama or Groq based on env.
 - `frontend/` contains the React UI for local WebSocket testing.
 
 ## Requirements
 - Python 3.11+
 - A running PostgreSQL instance (Supabase or local)
-- OLLAMA running locally or remotely
+- Ollama running locally/remote, or a Groq API key
 
 ## Setup
 1. Create a virtual environment and install dependencies.
@@ -82,12 +84,17 @@ uv run -m tools.vectorize_tools
 ## Configuration
 These environment variables are used by the agent and loader.
 
+- `LLM_PROVIDER` (`ollama` or `groq`)
 - `OLLAMA_MODEL`
 - `OLLAMA_EMBEDDING_MODEL`
 - `OLLAMA_BASE_URL`
 - `OLLAMA_TEMPERATURE`
 - `OLLAMA_NUM_PREDICT`
 - `OLLAMA_NUM_CTX`
+- `GROQ_API_KEY`
+- `GROQ_MODEL`
+- `GROQ_TEMPERATURE`
+- `GROQ_MAX_TOKENS`
 - `SUPASEBASE_DB_URL` or all of:
 - `SUPASEBASE_DB_HOST`
 - `SUPASEBASE_DB_NAME`
@@ -96,6 +103,9 @@ These environment variables are used by the agent and loader.
 - `SUPASEBASE_DB_PORT`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET` (optional but recommended)
+- `WHATSAPP_API_TOKEN`
+- `WHATSAPP_PHONE_NUMBER_ID`
+- `WHATSAPP_VERIFY_TOKEN`
 - `MAX_MESSAGE_LENGTH` (shared limit for inbound messages)
 - `SUMMARY_TRIGGER_TURNS` (turns before summarization)
 - `SUMMARY_KEEP_TURNS` (recent turns to keep verbatim)
@@ -103,19 +113,19 @@ These environment variables are used by the agent and loader.
 - `LANGCHAIN_API_KEY` (optional for tracing)
 - `LANGCHAIN_ENDPOINT` (optional for tracing)
 - `CREATE_TABLES` (used by `data/load_data.py`)
+- `LOG_LEVEL` (used by `data/load_data.py`)
 
 Note: The code expects the `SUPASEBASE_` prefix exactly as shown.
 
 ## Database Setup
-You have two ways to create and seed the database.
+You have two ways to create and seed the database. Both expect `products.json` in the `data/` directory.
 
-Option 1: Use `db.py` helpers.
+Option 1: Use `data/db.py` helpers (drops and recreates tables).
 
 ```bash
+cd data
 python db.py
 ```
-
-This runs `init_db()` and `seed_db()`. `seed_db()` expects a `products.json` file in the current working directory, so run it from a directory that contains `products.json` or place a copy at the repo root.
 
 Option 2: Use the data loader.
 
@@ -226,27 +236,38 @@ curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 The webhook handler is in `api/routers/telegram.py` and calls `run_agent()` to generate responses.
 
 ### WhatsApp
-Upcoming.
+Use WhatsApp Cloud API to send user messages to the agent via webhook.
 
-### Messenger
-Upcoming.
+1. Create a WhatsApp app in Meta and copy the API token and phone number ID.
+2. Set the env vars in `.env`:
 
-## WebSocket (Optional)
-For local testing, you can connect via WebSocket and send messages directly to the agent.
-
-WebSocket endpoint:
 ```bash
-ws://localhost:8000/ws/{client_id}
+WHATSAPP_API_TOKEN=your_api_token
+WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+WHATSAPP_VERIFY_TOKEN=your_verify_token
+MAX_MESSAGE_LENGTH=1000
 ```
 
-Any message you send is passed to `run_agent()` and the response is returned over the socket.
+3. Run the FastAPI server:
+
+```bash
+python main.py
+```
+
+4. Expose your server over HTTPS (Meta requires a public HTTPS URL).
+5. Configure the webhook URL (replace with your public domain):
+
+- Verify URL: `https://YOUR_DOMAIN/webhook`
+- Callback URL: `https://YOUR_DOMAIN/webhook`
+- Verify token: use `WHATSAPP_VERIFY_TOKEN`
+
+The webhook handler is in `api/routers/whatsapp.py` and sends responses with the Cloud API.
 
 ## Available Tools
 These are exposed to the LLM via LangChain tools in `tools/qa.py`.
 
-- `search_products` uses hybrid keyword search.
-- `get_product_by_name` fetches exact title matches.
-- `get_product_reviews` returns recent reviews by product ID.
+- `get_product_by_name` fetches product details by title (with fallback search).
+- `get_product_reviews` returns recent reviews with a short summary.
 - `get_tag_categories` lists categories.
 - `get_products_in_category` lists products by category.
 
@@ -254,13 +275,14 @@ These are exposed to the LLM via LangChain tools in `tools/qa.py`.
 The assistant behavior is governed by `prompts.py`.
 
 - The first message begins with a fixed greeting.
-- Tool usage is constrained by an explicit protocol.
-- The prompt enforces a single tool call per response.
+- Tool usage is mandatory after the first message.
+- If a tool returns no items, the assistant must ask for clarification.
+- All product or category results are shown as Markdown lists.
 
 ## Troubleshooting
 - If the agent returns empty results, verify the database is seeded.
 - If tools fail, confirm `SUPASEBASE_DB_URL` or the split `SUPASEBASE_DB_*` variables.
-- If the model fails to respond, check that OLLAMA is running and `OLLAMA_BASE_URL` is correct.
+- If the model fails to respond, check `LLM_PROVIDER` and the provider-specific env vars.
 - If tool retrieval returns no tools, rebuild the index with `uv run -m tools.vectorize_tools`.
 
 ## License
