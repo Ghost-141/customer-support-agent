@@ -77,6 +77,8 @@ Create a virtual environment and run the following commands:
 cd customer-support-agent
 pip install uv
 uv sync
+ollama pull llama3.2:3b # agent
+ollama pull embeddinggemma:300m # embedding model
 ```
 
 Update the `.env.example` with API keys and variables and rename it to `.env`.
@@ -212,55 +214,35 @@ The WebSocket server streams responses as JSON messages:
 ## Testing (Scenario)
 Scenario tests live in `tests/` and exercise the agent end-to-end with deterministic checks.
 
-### Setup
-1. Install dependencies (Scenario is already in the project env if you followed Setup).
-2. Ensure a reachable PostgreSQL database with the product data loaded.
-3. Ensure an Ollama (or other) model is running for the agent.
-
-### Optional: Local LLM for Scenario
-You can use Ollama for scenario runs by setting these env vars (the tests auto-detect them):
-
-```bash
-OLLAMA_MODEL=llama3.2:3b
-OLLAMA_BASE_URL=http://localhost:11434
-```
-
-If you want to override the model used by Scenario itself:
-
-```bash
-SCENARIO_MODEL=openai/your-model
-SCENARIO_API_BASE=http://localhost:11434/v1
-SCENARIO_API_KEY=ollama
-```
 
 ### Run Tests
-Run only the scenario tests:
+Run all the scenario tests:
 
-```bash
-pytest -m agent_test
-```
+  ```bash
+  pytest -m agent_test
+  ```
 
 Run one test file:
 
-```bash
-pytest tests/test_scenario_product_reviews.py
-```
+  ```bash
+  pytest tests/test_scenario_product_reviews.py
+  ```
 
 ## Frontend (Local UI)
 The `frontend/` React app connects to the WebSocket endpoint for local testing.
 
 1. Install dependencies:
 
-```bash
-cd frontend
-npm install
-```
+    ```bash
+    cd frontend
+    npm install
+    ```
 
 2. Run the dev server:
 
-```bash
-npm run dev
-```
+    ```bash
+    npm run dev
+    ```
 
 3. Open the URL shown by Vite and set the Server URL to match your API port.
 
@@ -272,60 +254,60 @@ Use Telegram to send user messages to the agent via webhook.
 1. Create a bot with BotFather and copy the token.
 2. Set the env vars in `.env`:
 
-```bash
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_WEBHOOK_SECRET=your_secret_value
-MAX_MESSAGE_LENGTH=1000
-```
+    ```bash
+    TELEGRAM_BOT_TOKEN=your_bot_token
+    TELEGRAM_WEBHOOK_SECRET=your_secret_value
+    MAX_MESSAGE_LENGTH=1000
+    ```
 
 3. Run the FastAPI server:
 
-```bash
-python main.py
-```
+    ```bash
+    python main.py
+    ```
 
 4. Expose your server over HTTPS (Telegram requires a public HTTPS URL).
 5. Register the webhook URL (replace with your public domain):
 
-```bash
-curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-  -H "Content-Type: application/json" \
-  -d "{\"url\":\"https://YOUR_DOMAIN/telegram/webhook\",\"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\"}"
-```
+    ```bash
+    curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+      -H "Content-Type: application/json" \
+      -d "{\"url\":\"https://YOUR_DOMAIN/telegram/webhook\",\"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\"}"
+    ```
 
 6. Verify the webhook:
 
-```bash
-curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
-```
+    ```bash
+    curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+    ```
 
 The webhook handler is in `api/routers/telegram.py` and calls `run_agent()` to generate responses.
 
-### WhatsApp
+### WhatsApp (Under Testing)
 Use WhatsApp Cloud API to send user messages to the agent via webhook.
 
 1. Create a WhatsApp app in Meta and copy the API token and phone number ID.
 2. Set the env vars in `.env`:
 
-```bash
-WHATSAPP_API_TOKEN=your_api_token
-WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
-WHATSAPP_VERIFY_TOKEN=your_verify_token
-MAX_MESSAGE_LENGTH=1000
-```
+    ```bash
+    WHATSAPP_API_TOKEN=your_api_token
+    WHATSAPP_PHONE_NUMBER_ID=your_phone_number_id
+    WHATSAPP_VERIFY_TOKEN=your_verify_token
+    MAX_MESSAGE_LENGTH=1000
+    ```
 
 3. Run the FastAPI server:
 
-```bash
-python main.py
-```
+    ```bash
+    python main.py
+    ```
 
 4. Expose your server over HTTPS (Meta requires a public HTTPS URL).
 5. Configure the webhook URL (replace with your public domain):
 
-- Verify URL: `https://YOUR_DOMAIN/webhook`
-- Callback URL: `https://YOUR_DOMAIN/webhook`
-- Verify token: use `WHATSAPP_VERIFY_TOKEN`
+   - Verify URL: `https://YOUR_DOMAIN/webhook`
+   - Callback URL: `https://YOUR_DOMAIN/webhook`
+   - Verify token: use `WHATSAPP_VERIFY_TOKEN`
 
 The webhook handler is in `api/routers/whatsapp.py` and sends responses with the Cloud API.
 
@@ -337,13 +319,6 @@ These are exposed to the LLM via LangChain tools in `tools/qa.py`.
 - `get_tag_categories` lists categories.
 - `get_products_in_category` lists products by category.
 
-## Prompt Rules
-The assistant behavior is governed by `prompts.py`.
-
-- The first message begins with a fixed greeting.
-- Tool usage is mandatory after the first message.
-- If a tool returns no items, the assistant must ask for clarification.
-- All product or category results are shown as Markdown lists.
 
 ## Troubleshooting
 - If the agent returns empty results, verify the database is seeded.
