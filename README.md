@@ -149,20 +149,32 @@ LANGWATCH_API_KEY
 Note: The code expects the `SUPASEBASE_` prefix exactly as shown.
 
 ## Database Setup
-You have two ways to create and seed the database. Both expect `products.json` in the `data/` directory.
+For local development, use the included Docker Compose file to run PostgreSQL.
 
-Option 1: Use `data/db.py` helpers (drops and recreates tables).
+Local Docker (recommended):
+
+```bash
+docker compose up -d
+```
+
+Then set your `.env` to point at the local container:
+
+```bash
+SUPASEBASE_DB_URL=postgresql://postgres:postgresql@localhost:5432/postgres?sslmode=disable
+```
+
+Notes:
+- Default local credentials come from `docker_compose.yml`: user `postgres`, password `postgresql`, db `postgres`.
+- pgAdmin is available at `http://localhost:8888` with `admin@example.com` / `postgresql`.
+- The agent will create checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`) on first run if the DB user has create privileges.
+
+You have two ways to create and seed the product tables. Both expect `products.json` in the `data/` directory.
+
+Use `data/db.py` helpers (drops and recreates tables).
 
 ```bash
 cd data
 python db.py
-```
-
-Option 2: Use the data loader.
-
-```bash
-cd data
-python load_data.py
 ```
 
 Set `CREATE_TABLES=1` in your environment to create tables automatically.
