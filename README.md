@@ -74,7 +74,7 @@ support_agent/
 Create a virtual environment and run the following commands:
 
 ```bash
-cd customer-support-agent
+cd support_agent
 pip install uv
 uv sync
 ollama pull llama3.2:3b # agent
@@ -89,6 +89,87 @@ Build the tool-retrieval index for Chroma.
 ```bash
 python -m tools.vectorize_tools
 ```
+
+## Docker Deployment
+You can run the full backend stack (API + Postgres) with Docker and connect it to an Ollama instance running on your host machine.
+
+1. Prepare env:
+
+    ```bash
+    cp .env.example .env
+    ```
+
+2. In `.env`, keep these values for Docker + local Ollama:
+
+    ```bash
+    LLM_PROVIDER=ollama
+    OLLAMA_MODEL=llama3.2:latest
+    OLLAMA_EMBEDDING_MODEL=embeddinggemma:300m
+    ```
+
+3. Start Ollama on host (outside Docker) and pull models:
+
+    ```bash
+    ollama serve
+    ollama pull llama3.2:latest
+    ollama pull embeddinggemma:300m
+    ```
+
+4. Start Docker services:
+
+    ```bash
+    docker compose -f docker_compose.yml up -d --build
+    ```
+
+5. API is available at:
+
+    ```text
+    http://localhost:8000
+    ```
+
+6. Open API docs:
+
+    ```text
+    http://localhost:8000/docs
+    ```
+
+7. Verify container can reach Ollama:
+
+    ```bash
+    docker exec support-agent-api uv run python -c "import requests; print(requests.get('http://host.docker.internal:11434/api/tags', timeout=10).status_code)"
+    ```
+
+Notes:
+- Container-to-host Ollama URL is set in compose as `http://host.docker.internal:11434`.
+- On Linux, `extra_hosts: host.docker.internal:host-gateway` is already configured in `docker_compose.yml`.
+- On first boot, the container auto-seeds Postgres and auto-builds the Chroma tool index.
+- Set `AUTO_SEED_DB=0` or `AUTO_VECTORIZE_TOOLS=0` in `.env` to disable those startup steps.
+
+### Docker + Telegram Webhook (ngrok)
+1. Set Telegram values in `.env`:
+
+    ```bash
+    TELEGRAM_BOT_TOKEN=your_bot_token
+    TELEGRAM_WEBHOOK_SECRET=your_secret
+    ```
+
+2. Start ngrok:
+
+    ```bash
+    ngrok http 8000
+    ```
+
+3. Set webhook with helper script (recommended over manual curl escaping):
+
+    ```bash
+    python scripts/set_telegram_webhook.py --base-url https://YOUR_NGROK_DOMAIN
+    ```
+
+4. Verify current webhook:
+
+    ```bash
+    python scripts/set_telegram_webhook.py --info-only
+    ```
 
 ## Configuration
 These environment variables are used by the agent and loader.
@@ -149,37 +230,46 @@ LANGWATCH_API_KEY
 Note: The code expects the `SUPASEBASE_` prefix exactly as shown.
 
 ## Database Setup
-For local development, use the included Docker Compose file to run PostgreSQL.
+The agent requires PostgreSQL for:
+- product catalog data
+- conversation checkpoint memory
 
-Local Docker (recommended):
+Recommended (Docker full stack):
 
 ```bash
-docker compose up -d
+docker compose -f docker_compose.yml up -d --build
 ```
 
-Then set your `.env` to point at the local container:
+This already starts Postgres and API together. On first startup, the container:
+- creates checkpoint tables (if missing)
+- seeds product data when `products` is empty (`AUTO_SEED_DB=1`)
+
+Optional (run only PostgreSQL service):
+
+```bash
+docker compose -f docker_compose.yml up -d postgresql_db
+```
+
+Use this DB URL in `.env` for local app runs:
 
 ```bash
 SUPASEBASE_DB_URL=postgresql://postgres:postgresql@localhost:5432/postgres?sslmode=disable
 ```
 
 Notes:
-- Default local credentials come from `docker_compose.yml`: user `postgres`, password `postgresql`, db `postgres`.
-- pgAdmin is available at `http://localhost:8888` with `admin@example.com` / `postgresql`.
-- The agent will create checkpoint tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`) on first run if the DB user has create privileges.
-
-You have two ways to create and seed the product tables. Both expect `products.json` in the `data/` directory.
-
-Use `data/db.py` helpers (drops and recreates tables).
+- Default DB credentials from `docker_compose.yml`: 
+  - user: `postgres`,
+  - password: `postgresql`
+  - db: `postgres`.
+- pgAdmin is available at `http://localhost:8888` when started with profile `dev`.
+- Manual reseed (drops and recreates product tables):
 
 ```bash
 cd data
 python db.py
 ```
 
-Set `CREATE_TABLES=1` in your environment to create tables automatically.
-
-## Run The Agent
+## Run The Agent for Manual Testing
 Start the local interactive loop:
 
 ```bash
@@ -203,42 +293,36 @@ You have two local testing options.
 
 1. CLI testing
 
-```bash
-python agent.py
-```
+    ```bash
+    python agent.py
+    ```
 
 2. WebSocket testing
 
-- Backend endpoint: `ws://localhost:80/ws/{client_id}`
-- Send plain text or JSON:
+   - Backend endpoint: `ws://localhost:80/ws/{client_id}`
+   - Send plain text or JSON:
 
-```json
-{"text": "Hello", "stream": true}
-```
+   ```json
+   {"text": "Hello", "stream": true}
+   ```
 
-The WebSocket server streams responses as JSON messages:
-
-```json
-{"type": "chunk", "text": "partial"}
-{"type": "done"}
-```
 
 ## Testing (Scenario)
 Scenario tests live in `tests/` and exercise the agent end-to-end with deterministic checks.
 
 
 ### Run Tests
-Run all the scenario tests:
+1. Run all the scenario tests:
 
-  ```bash
-  pytest -m agent_test
-  ```
+    ```bash
+    pytest -m agent_test
+    ```
 
-Run one test file:
+2. Run one test file:
 
-  ```bash
-  pytest tests/test_scenario_product_reviews.py
-  ```
+    ```bash
+    pytest tests/test_scenario_product_reviews.py
+    ```
 
 ## Frontend (Local UI)
 The `frontend/` React app connects to the WebSocket endpoint for local testing.
@@ -272,25 +356,33 @@ Use Telegram to send user messages to the agent via webhook.
     MAX_MESSAGE_LENGTH=1000
     ```
 
-3. Run the FastAPI server:
+3. Start the API (local or Docker):
 
     ```bash
+    # local
     python main.py
+
+    # docker
+    docker compose -f docker_compose.yml up -d --build
     ```
 
 4. Expose your server over HTTPS (Telegram requires a public HTTPS URL).
-5. Register the webhook URL (replace with your public domain):
+5. If you use ngrok with Docker:
 
     ```bash
-    curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
-      -H "Content-Type: application/json" \
-      -d "{\"url\":\"https://YOUR_DOMAIN/telegram/webhook\",\"secret_token\":\"$TELEGRAM_WEBHOOK_SECRET\"}"
+    ngrok http 8000
     ```
 
-6. Verify the webhook:
+6. Set the webhook with the helper script (recommended):
 
     ```bash
-    curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
+    python scripts/set_telegram_webhook.py --base-url https://YOUR_DOMAIN
+    ```
+
+7. Verify the webhook:
+
+    ```bash
+    python scripts/set_telegram_webhook.py --info-only
     ```
 
 The webhook handler is in `api/routers/telegram.py` and calls `run_agent()` to generate responses.
@@ -326,7 +418,7 @@ The webhook handler is in `api/routers/whatsapp.py` and sends responses with the
 ## Available Tools
 These are exposed to the LLM via LangChain tools in `tools/qa.py`.
 
-- `get_product_by_name` fetches product details by title (with fallback search).
+- `get_product_by_name` fetches product details by title (with fallback search). If multiple similar products are found, it returns a disambiguation list so the assistant asks the user to choose the exact item.
 - `get_product_reviews` returns recent reviews with a short summary.
 - `get_tag_categories` lists categories.
 - `get_products_in_category` lists products by category.
@@ -337,6 +429,9 @@ These are exposed to the LLM via LangChain tools in `tools/qa.py`.
 - If tools fail, confirm `SUPASEBASE_DB_URL` or the split `SUPASEBASE_DB_*` variables.
 - If the model fails to respond, check `LLM_PROVIDER` and the provider-specific env vars.
 - If tool retrieval returns no tools, rebuild the index with `uv run -m tools.vectorize_tools`.
+- If Docker says Postgres is unhealthy with `initdb ... directory exists but is not empty`, recreate volumes (`docker compose down -v`) or use a new Postgres volume name.
+- If local run fails with `password authentication failed for user "postgres"`, fix `.env` DB credentials or recreate DB volume to match `docker_compose.yml`.
+- If Compose warns `version is obsolete`, remove `version:` from compose file; this warning does not block startup.
 
 ## License
 See `LICENSE`.

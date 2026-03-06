@@ -1,31 +1,61 @@
 version: "3.9"
 
 services:
-  # PostgreSQL database
-  postgresql_db:
-    image: postgres:latest
-    container_name: postgresql-db
-    restart: always
-    ports:
-      - "5432:5432" # Default PostgreSQL port
+  agent-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: support-agent-api
+    restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      POSTGRES_PASSWORD: postgresql
+      SUPASEBASE_DB_URL: postgresql://postgres:postgresql@postgresql_db:5432/postgres?sslmode=disable
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      AUTO_SEED_DB: ${AUTO_SEED_DB:-1}
+      AUTO_VECTORIZE_TOOLS: ${AUTO_VECTORIZE_TOOLS:-1}
+    ports:
+      - "8000:80"
+    depends_on:
+      postgresql_db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - postgresql_db_data:/var/lib/postgresql # Docker managed volume
+      - chroma_db_data:/app/data/chroma_db
 
-  # pgAdmin4 Web UI for PostgreSQL database
+  postgresql_db:
+    image: postgres:16
+    container_name: postgresql-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgresql
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres -d postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - postgresql_db_data:/var/lib/postgresql/data
+
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: pgadmin
-    restart: always
+    restart: unless-stopped
+    profiles: [ "dev" ]
     ports:
-      - "8888:80" # Expose Web UI to port 8888
+      - "8888:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@example.com
       PGADMIN_DEFAULT_PASSWORD: postgresql
     volumes:
-      - pgadmin_data:/var/lib/pgadmin # Docker managed volume
+      - pgadmin_data:/var/lib/pgadmin
 
 volumes:
   postgresql_db_data:
   pgadmin_data:
+  chroma_db_data:
