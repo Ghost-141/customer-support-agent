@@ -24,6 +24,21 @@ class ProductItem(BaseModel):
     stock: int | None = None
 
 
+class ProductCandidateItem(BaseModel):
+    id: int | None = None
+    title: str | None = None
+    brand: str | None = None
+    category: str | None = None
+    price: float | None = None
+
+
+class ProductDisambiguation(BaseModel):
+    type: str = "product_disambiguation"
+    query: str
+    message: str
+    items: list[ProductCandidateItem]
+
+
 class SearchResults(BaseModel):
     type: str = "search_results"
     query: str

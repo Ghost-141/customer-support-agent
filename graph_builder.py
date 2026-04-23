@@ -28,6 +28,7 @@ def build_graph(checkpointer=None):
 
     embeddings = OllamaEmbeddings(
         model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
+        base_url=os.getenv("OLLAMA_BASE_URL"),
     )
 
     vectorstore = Chroma(
@@ -172,18 +173,37 @@ def build_graph(checkpointer=None):
         return tools
 
     async def tool_retriever(state: ChatbotState) -> dict:
-        print("--- Retrieving relevant tools... ---")
+        print("--- Checking tool relevance... ---")
         last_message = state["messages"][-1].content
         if not isinstance(last_message, str):
-            # Handle cases where message might be a list of parts
             last_message = str(last_message)
 
-        docs = vectorstore.similarity_search(last_message, k=3)
-        tool_names = [doc.metadata["name"] for doc in docs]
+        # 1. Immediate Bypass for Small Talk (Zero-cost filter)
+        small_talk_keywords = {"hi", "hello", "thanks", "thank you", "bye", "ok", "okay", "cool", "hey"}
+        clean_msg = last_message.lower().strip().strip("?!.")
+        if clean_msg in small_talk_keywords or len(clean_msg.split()) < 2:
+            print("DEBUG: Small talk detected. Skipping tools.")
+            return {"retrieved_tools": []}
+
+        # 2. Use raw distance scores (Chroma L2 distance)
+        # Increase k to 4 to include all available tools in the consideration set
+        docs_with_scores = vectorstore.similarity_search_with_score(last_message, k=4)
+        
+        # Keep tools with a distance < 1.8 (slightly more lenient)
+        tool_names = []
+        for doc, score in docs_with_scores:
+            print(f"DEBUG: Tool {doc.metadata['name']} score: {score}")
+            if score < 1.8:
+                tool_names.append(doc.metadata["name"])
+        
+        # 3. Fallback: If no tools were found but the message is not small talk, 
+        # always provide 'get_product_by_name' as a default search option.
+        if not tool_names and len(last_message.split()) >= 2:
+            tool_names = ["get_product_by_name"]
+            print("DEBUG: Fallback to get_product_by_name.")
+        
         filtered_tools = _data_driven_tool_filter(last_message, tool_names)
-        print(f"DEBUG: Retrieved tools: {tool_names}")
-        if filtered_tools != tool_names:
-            print(f"DEBUG: Filtered tools: {filtered_tools}")
+        print(f"DEBUG: Relevant tools: {filtered_tools}")
         return {"retrieved_tools": filtered_tools}
 
     async def assistant(state: ChatbotState) -> dict:
@@ -207,35 +227,30 @@ def build_graph(checkpointer=None):
                     ]
                 }
 
-        # Detect if this is the very first turn (only 1 human message in history)
+        # Detect if this is the very first turn
         is_not_first_turn = len(state["messages"]) > 1 or state.get("summary")
 
-        # Dynamic tool binding based on retrieved tools
         retrieved_names = state.get("retrieved_tools", [])
         available_tools = [t for t in TOOLS if t.name in retrieved_names]
 
-        # Combine main prompt and summary into a single SystemMessage
         full_system_content = system_prompt
 
         if is_not_first_turn:
             full_system_content += (
                 "\n\n--- TURN STATUS ---\n"
-                "This is NOT the first message of the conversation. "
-                "The user has already been welcomed. "
-                "DO NOT include 'Welcome to our store!' and DO NOT introduce yourself or your services again. "
-                "Focus strictly on answering the current question."
+                "This is NOT the first message. DO NOT include 'Welcome to our store!'."
             )
 
-        # Only bind tools if some were retrieved
+        # Dynamic tool binding
         if available_tools:
             llm_with_tools = llm.bind_tools(available_tools)
         else:
-            # GUARDRAIL: If no tools were found, forbid guessing
+            # If no tools are relevant, allow the LLM to speak freely (conversational filler)
             llm_with_tools = llm
             full_system_content += (
-                "\n\nCRITICAL: No database tools were identified for this query. "
-                "Since tool usage is MANDATORY, you MUST NOT answer from your own knowledge. "
-                "Instead, politely ask the user for more details so you can find the right information."
+                "\n\nGUIDE: No specific data tools are required for this turn. "
+                "If the user is just saying hello, thank you, or making small talk, "
+                "respond naturally and helpfully without calling any tools."
             )
 
         summary = state.get("summary")
@@ -296,8 +311,32 @@ def build_graph(checkpointer=None):
     tool_node = ToolNode(TOOLS)
 
     async def debug_tool_node(state: ChatbotState) -> dict:
-        print("--- Executing tools... ---")
-        return await tool_node.ainvoke(state)
+        messages = state["messages"]
+        if messages:
+            last_message = messages[-1]
+            if isinstance(last_message, AIMessage) and last_message.tool_calls:
+                for tool_call in last_message.tool_calls:
+                    print(
+                        f"DEBUG: Executing tool: {tool_call['name']} with args: {tool_call['args']}"
+                    )
+            else:
+                print("DEBUG: Executing tools...")
+        else:
+            print("DEBUG: Executing tools...")
+
+        result = await tool_node.ainvoke(state)
+
+        # Log results for better visibility
+        for msg in result.get("messages", []):
+            if isinstance(msg, ToolMessage):
+                content_preview = (
+                    str(msg.content)[:200] + "..."
+                    if len(str(msg.content)) > 200
+                    else str(msg.content)
+                )
+                print(f"DEBUG: Tool {msg.name} returned: {content_preview}")
+
+        return result
 
     graph_builder = StateGraph(ChatbotState)
     graph_builder.add_node("preprocess", lambda state: {})
