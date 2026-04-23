@@ -9,6 +9,7 @@ class ChatbotState(TypedDict):
     messages: Annotated[List[BaseMessage], add_messages]
     summary: str | None
     retrieved_tools: List[str]
+    knowledge_base: Annotated[dict, lambda old, new: {**old, **new}]
 
 
 class ErrorResponse(BaseModel):
