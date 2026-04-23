@@ -1,15 +1,14 @@
 import os
+import json
 from typing import Any, Dict, List
-
+from dotenv import load_dotenv
 import psycopg
 from psycopg.rows import dict_row
-from dotenv import load_dotenv
-import json
+from psycopg_pool import ConnectionPool
 
-
+# Load environment variables once
 load_dotenv()
 load_dotenv(".env", override=False)
-
 
 def _build_db_url() -> str:
     url = os.getenv("SUPASEBASE_DB_URL")
@@ -26,13 +25,21 @@ def _build_db_url() -> str:
         )
     return f"postgresql://{user}:{password}@{host}:{port}/{name}?sslmode=require"
 
-
 DB_URL = _build_db_url()
 
-
-def _connect():
-    return psycopg.connect(DB_URL, row_factory=dict_row)
-
+# Use a sync pool for the tool catalog calls
+# Centralized sync connection pool to avoid redundant handshakes
+sync_pool = ConnectionPool(
+    conninfo=DB_URL,
+    min_size=1,
+    max_size=10,
+    max_idle=300,
+    check=ConnectionPool.check_connection,
+    kwargs={
+        "autocommit": True,
+        "row_factory": dict_row,
+    },
+)
 
 def search_products_hybrid(query: str, limit: int = 5) -> List[Dict[str, Any]]:
     if not query or not query.strip():
@@ -68,7 +75,7 @@ def search_products_hybrid(query: str, limit: int = 5) -> List[Dict[str, Any]]:
       keyword_match desc
     limit %(limit)s
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 sql,
@@ -81,18 +88,16 @@ def search_products_hybrid(query: str, limit: int = 5) -> List[Dict[str, Any]]:
             )
             return cur.fetchall()
 
-
 def get_product_by_id(product_id: int) -> Dict[str, Any] | None:
     sql = """
     select *
     from products
     where id = %(id)s
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, {"id": product_id})
             return cur.fetchone()
-
 
 def get_products_by_title(title: str, limit: int = 5) -> List[Dict[str, Any]]:
     sql = """
@@ -101,25 +106,25 @@ def get_products_by_title(title: str, limit: int = 5) -> List[Dict[str, Any]]:
     where lower(title) = lower(%(title)s)
     limit %(limit)s
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, {"title": title, "limit": limit})
             return cur.fetchall()
 
-
 def get_products_by_category(category: str, limit: int = 5) -> List[Dict[str, Any]]:
     sql = """
-    select title, price, stock
+    select title, price, stock, category,
+           similarity(category, %(category)s) as sim_score
     from products
-    where lower(category) = lower(%(category)s)
-    order by title
+    where category ilike %(category)s
+       or similarity(category, %(category)s) > 0.3
+    order by sim_score desc, title
     limit %(limit)s
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, {"category": category, "limit": limit})
             return cur.fetchall()
-
 
 def get_product_reviews(product_id: int, limit: int = 5) -> List[Dict[str, Any]]:
     sql = """
@@ -129,11 +134,10 @@ def get_product_reviews(product_id: int, limit: int = 5) -> List[Dict[str, Any]]
     order by date desc nulls last
     limit %(limit)s
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, {"id": product_id, "limit": limit})
             return cur.fetchall()
-
 
 def list_tag_categories() -> List[str]:
     sql = """
@@ -142,16 +146,15 @@ def list_tag_categories() -> List[str]:
     where category is not null
     order by category
     """
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             rows = cur.fetchall()
             return [row["category"] for row in rows if row.get("category")]
 
-
 def init_db():
     """Initializes the database schema."""
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DROP TABLE IF EXISTS product_reviews;")
             cur.execute("DROP TABLE IF EXISTS products;")
@@ -194,13 +197,12 @@ def init_db():
             """
             )
 
-
 def seed_db():
     """Seeds the database with data from products.json."""
     with open("products.json", "r") as f:
         data = json.load(f)
 
-    with _connect() as conn:
+    with sync_pool.connection() as conn:
         with conn.cursor() as cur:
             for p in data["products"]:
                 cur.execute(
@@ -246,7 +248,6 @@ def seed_db():
                             r["reviewerEmail"],
                         ),
                     )
-
 
 if __name__ == "__main__":
     init_db()

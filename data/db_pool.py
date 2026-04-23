@@ -8,7 +8,10 @@ def create_async_pool() -> AsyncConnectionPool:
     return AsyncConnectionPool(
         conninfo=conn_info,
         open=False,
+        min_size=1,  # Keep at least one connection alive
         max_size=20,
+        max_idle=300, # Close connections that are idle for more than 5 minutes
+        check=AsyncConnectionPool.check_connection, # Check connection health on checkout
         kwargs={
             "autocommit": True,
             "prepare_threshold": None,
