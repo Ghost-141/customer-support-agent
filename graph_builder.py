@@ -1,5 +1,6 @@
 import os
 import json
+import difflib
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -25,17 +26,6 @@ load_dotenv(".env")
 
 def build_graph(checkpointer=None):
     llm = get_llm()
-
-    embeddings = OllamaEmbeddings(
-        model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
-        base_url=os.getenv("OLLAMA_BASE_URL"),
-    )
-
-    vectorstore = Chroma(
-        persist_directory="./data/chroma_db",
-        embedding_function=embeddings,
-        collection_name="tools",
-    )
 
     summary_trigger_turns = int(os.getenv("SUMMARY_TRIGGER_TURNS", "8"))
     summary_keep_turns = int(os.getenv("SUMMARY_KEEP_TURNS", "3"))
@@ -66,6 +56,8 @@ def build_graph(checkpointer=None):
             role = "User"
         elif isinstance(msg, AIMessage):
             role = "Assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "Data"
         else:
             return None
 
@@ -179,34 +171,108 @@ def build_graph(checkpointer=None):
             last_message = str(last_message)
 
         # 1. Immediate Bypass for Small Talk (Zero-cost filter)
-        small_talk_keywords = {"hi", "hello", "thanks", "thank you", "bye", "ok", "okay", "cool", "hey"}
+        small_talk_keywords = {
+            "hi",
+            "hello",
+            "thanks",
+            "thank you",
+            "bye",
+            "ok",
+            "okay",
+            "cool",
+            "hey",
+            "nice",
+        }
         clean_msg = last_message.lower().strip().strip("?!.")
-        if clean_msg in small_talk_keywords or len(clean_msg.split()) < 2:
-            print("DEBUG: Small talk detected. Skipping tools.")
+
+        if clean_msg in small_talk_keywords:
+            print(f"DEBUG: Small talk detected ('{clean_msg}'). Skipping tools.")
             return {"retrieved_tools": []}
 
-        # 2. Use raw distance scores (Chroma L2 distance)
-        # Increase k to 4 to include all available tools in the consideration set
-        docs_with_scores = vectorstore.similarity_search_with_score(last_message, k=4)
-        
-        # Keep tools with a distance < 1.8 (slightly more lenient)
-        tool_names = []
-        for doc, score in docs_with_scores:
-            print(f"DEBUG: Tool {doc.metadata['name']} score: {score}")
-            if score < 1.8:
-                tool_names.append(doc.metadata["name"])
-        
-        # 3. Fallback: If no tools were found but the message is not small talk, 
-        # always provide 'get_product_by_name' as a default search option.
-        if not tool_names and len(last_message.split()) >= 2:
-            tool_names = ["get_product_by_name"]
-            print("DEBUG: Fallback to get_product_by_name.")
-        
+        # 2. Knowledge Base Check: If the question is about a product we already know, skip tool retrieval
+        attribute_keywords = {
+            "dimension",
+            "dimensions",
+            "SKU",
+            "price",
+            "stock",
+            "weight",
+            "specs",
+            "shipping",
+            "return",
+            "warranty",
+            "policy",
+        }
+        kb = state.get("knowledge_base", {})
+        known_products = [
+            k.split("product:", 1)[1].lower()
+            for k in kb.keys()
+            if k.startswith("product:")
+        ]
+        msg_lower = last_message.lower()
+
+        print(f"DEBUG: KB check - Question: '{msg_lower}' | Known: {known_products}")
+
+        # Fuzzy match product names
+        mentions_known = any(p in msg_lower for p in known_products)
+        if not mentions_known:
+            # Check for close matches in words
+            words = msg_lower.replace("?", "").split()
+            for p in known_products:
+                if difflib.get_close_matches(p, [msg_lower], n=1, cutoff=0.7) or any(
+                    difflib.get_close_matches(p, [w], n=1, cutoff=0.8) for w in words
+                ):
+                    mentions_known = True
+                    break
+
+        # Check if the message is just an attribute/pronoun query
+        msg_words = msg_lower.replace("?", "").split()
+        has_attr_fuzzy = any(
+            difflib.get_close_matches(attr, msg_words, n=1, cutoff=0.8)
+            for attr in attribute_keywords
+        )
+        is_attr_only = all(
+            word in attribute_keywords
+            or word
+            in {
+                "what",
+                "is",
+                "the",
+                "how",
+                "much",
+                "it",
+                "that",
+                "of",
+                "show",
+                "me",
+                "tell",
+                "for",
+                "any",
+                "specs",
+                "details",
+            }
+            or any(
+                difflib.get_close_matches(attr, [word], n=1, cutoff=0.8)
+                for attr in attribute_keywords
+            )
+            for word in msg_words
+        )
+
+        if mentions_known or (is_attr_only and len(known_products) > 0):
+            print(
+                f"DEBUG: Fact found in Knowledge Base (Fuzzy Match). Blocking tool retrieval."
+            )
+            return {"retrieved_tools": []}
+
+        # Return all tools (let LLM decide based on context)
+        tool_names = [t.name for t in TOOLS]
         filtered_tools = _data_driven_tool_filter(last_message, tool_names)
         print(f"DEBUG: Relevant tools: {filtered_tools}")
         return {"retrieved_tools": filtered_tools}
 
     async def assistant(state: ChatbotState) -> dict:
+        kb = state.get("knowledge_base", {})
+        print(f"DEBUG: Assistant entering with KB keys: {list(kb.keys())}")
         print("--- Assistant thinking... ---")
 
         last_message = state["messages"][-1] if state["messages"] else None
@@ -262,6 +328,18 @@ def build_graph(checkpointer=None):
                 "Note: The conversation is already in progress. Do NOT repeat the welcome message."
             )
 
+        kb = state.get("knowledge_base", {})
+        if kb:
+            kb_text = json.dumps(kb, indent=2)
+            full_system_content += (
+                f"\n\n--- LATEST KNOWN FACTS (KNOWLEDGE BASE) ---\n"
+                "You ALREADY HAVE the following data. If the user asks for anything "
+                "contained below, answer directly from this data. DO NOT call a tool "
+                "if the data is already here.\n"
+                f"{kb_text}\n"
+                "------------------------------------------"
+            )
+
         messages = [SystemMessage(content=full_system_content)] + state["messages"]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
@@ -280,8 +358,10 @@ def build_graph(checkpointer=None):
         summary_system_prompt = (
             "You are a summarization assistant. Update the running summary of a "
             "customer support chat. Preserve user preferences, constraints, "
-            "product interests, decisions, and unresolved questions. Avoid tool "
-            "call details. Write plain text, no bullets."
+            "product interests, decisions, and unresolved questions. "
+            "CRITICAL: Keep specific product data (price, stock, features) that has already been retrieved "
+            "so the agent doesn't need to call tools for the same info again. "
+            "Avoid technical tool call IDs. Write plain text, no bullets."
         )
         if summary_max_chars > 0:
             summary_system_prompt += f" Keep it under {summary_max_chars} characters."
@@ -326,7 +406,8 @@ def build_graph(checkpointer=None):
 
         result = await tool_node.ainvoke(state)
 
-        # Log results for better visibility
+        # Log results and Extract Knowledge (Latest Known Facts)
+        new_knowledge = {}
         for msg in result.get("messages", []):
             if isinstance(msg, ToolMessage):
                 content_preview = (
@@ -336,10 +417,37 @@ def build_graph(checkpointer=None):
                 )
                 print(f"DEBUG: Tool {msg.name} returned: {content_preview}")
 
-        return result
+                # Knowledge Extraction Logic
+                payload = _tool_payload(msg)
+                if isinstance(payload, dict):
+                    # Cache specific product details
+                    if payload.get("type") == "product_details" and payload.get(
+                        "items"
+                    ):
+                        for item in payload["items"]:
+                            name = item.get("title")
+                            if name:
+                                new_knowledge[f"product:{name}"] = item
+                    # Cache review summaries
+                    elif payload.get("type") == "review_summary":
+                        # We need to find which product this was for from the tool call
+                        last_aimsg = state["messages"][-1]
+                        if isinstance(last_aimsg, AIMessage):
+                            for tc in last_aimsg.tool_calls:
+                                if tc["id"] == msg.tool_call_id:
+                                    pname = tc["args"].get("product_name")
+                                    if pname:
+                                        new_knowledge[f"reviews:{pname}"] = payload.get(
+                                            "summary"
+                                        )
+
+        return {**result, "knowledge_base": new_knowledge}
 
     graph_builder = StateGraph(ChatbotState)
-    graph_builder.add_node("preprocess", lambda state: {})
+    graph_builder.add_node(
+        "preprocess",
+        lambda state: {"knowledge_base": state.get("knowledge_base") or {}},
+    )
     graph_builder.add_node("tool_retriever", tool_retriever)
     graph_builder.add_node("summarize", summarize)
     graph_builder.add_node("assistant", assistant)

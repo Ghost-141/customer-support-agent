@@ -36,7 +36,6 @@ def _build_thread_id(from_number: str, channel: str = "whatsapp") -> str:
 
 def _build_run_config(from_number: str, channel: str) -> tuple[str, dict]:
     thread_id = _build_thread_id(from_number, channel)
-    # LangSmith tracing configuration (set LANGCHAIN_API_KEY in your env)
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     os.environ.setdefault("LANGCHAIN_PROJECT", f"{channel.capitalize()} Support Agent")
 
