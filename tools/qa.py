@@ -3,6 +3,8 @@ from data.db import get_product_reviews as _get_product_reviews
 from api.schemas import (
     ProductDetails,
     ProductDetailItem,
+    ProductDisambiguation,
+    ProductCandidateItem,
     ReviewItem,
     ReviewResults,
     ReviewResponse,
@@ -21,13 +23,51 @@ from data.db import (
 )
 
 
+def _build_disambiguation(query: str, products: list[dict]) -> dict | None:
+    unique = []
+    seen_titles = set()
+
+    for p in products:
+        title = (p.get("title") or "").strip()
+        if not title:
+            continue
+        title_key = title.lower()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        unique.append(
+            ProductCandidateItem(
+                id=p.get("id"),
+                title=title,
+                brand=p.get("brand"),
+                category=p.get("category"),
+                price=p.get("price"),
+            )
+        )
+
+    if len(unique) <= 1:
+        return None
+
+    return ProductDisambiguation(
+        query=query,
+        message=(
+            "I found multiple similar products. Please tell me which exact one you want."
+        ),
+        items=unique[:5],
+    ).model_dump()
+
+
 @tool
 def get_product_by_name(product_name: str) -> dict:
-    """Fetch specifications, pricing, and stock status ONLY for a specific, known product name.
+    """Fetch technical specifications, current pricing, and real-time stock status for a SPECIFIC product.
 
-    Use this tool EXCLUSIVELY when the user asks about a concrete product title they already mentioned or know (e.g., "Essence Mascara", "kiwi").
-    Do NOT use this tool for category wise product discovery.
-    This tool is strictly for retrieving data on a single, identified product.
+    USE THIS TOOL WHEN:
+    - The user provides a specific product name or title (e.g., "Red Nail Polish", "cat food", "kiwi").
+    - The user asks about price, weight, dimensions, or availability of a known item.
+
+    DO NOT USE THIS TOOL:
+    - To browse categories or see lists of different products.
+    - If the user is asking for 'reviews' or 'what people think' (use get_product_reviews instead).
     """
     # Try exact title match first
     products = get_products_by_title(product_name, limit=5)
@@ -38,6 +78,10 @@ def get_product_by_name(product_name: str) -> dict:
 
     if not products:
         return ProductDetails(items=[]).model_dump()
+
+    disambiguation = _build_disambiguation(product_name, products)
+    if disambiguation:
+        return disambiguation
 
     items = []
     for product in products:
@@ -67,10 +111,14 @@ def get_product_by_name(product_name: str) -> dict:
 def get_product_reviews(
     product_name: str | None = None, product_id: int | None = None
 ) -> dict:
-    """Retrieve customer feedback, ratings, and sentiment for a product.
+    """Retrieve customer feedback, star ratings, and quality sentiment for a product.
 
-    Use this when the user asks "What do people think about this?", "Show me reviews for product kiwi", or "Is this product any good?".
-    If only a product name is provided, the tool will look up the product ID first.
+    USE THIS TOOL WHEN:
+    - The user asks for opinions, reviews, or "what people think" about an item.
+    - The user asks "is this product any good?" or "show me feedback".
+
+    DO NOT USE THIS TOOL:
+    - To find out the price, stock status, or technical specs (use get_product_by_name instead).
     """
     if product_id is None:
         if not product_name:
@@ -111,7 +159,7 @@ def get_product_reviews(
 class CategoryArgs(BaseModel):
     category: str = Field(
         ...,
-        description="Single category name as a string, for example: 'groceries'.",
+        description="The exact category name to filter by (e.g., 'beauty', 'groceries', 'fragrances').",
     )
 
 
@@ -144,10 +192,11 @@ def _summarize_reviews(comments: list[str]) -> str | None:
 
 @tool
 def get_tag_categories() -> dict:
-    """List the types of products, departments, or categories available in the store.
+    """Get a high-level list of all available product departments and categories in the store.
 
-    Use this when the user asks "What products do you sell?", "What categories do you have?", "What types of items are available?", or "Show me the store departments".
-    This is the best tool for an overview of the store's inventory structure and departments.
+    USE THIS TOOL WHEN:
+    - The user asks "what do you sell?", "show me your categories", or "what departments do you have?".
+    - The user wants an overview of the store's inventory structure.
     """
     categories = list_tag_categories()
     if not categories:
@@ -157,10 +206,15 @@ def get_tag_categories() -> dict:
 
 @tool(args_schema=CategoryArgs)
 def get_products_in_category(category: str) -> dict:
-    """List all products belonging to a specific category or department name.
+    """List all individual products found within a specific category or department.
 
-    Use this when the user wants to see everything in a category (e.g., "Show me all beauty products", "What items are in the groceries category?").
-    The user must provide a valid category name.
+    USE THIS TOOL WHEN:
+    - The user wants to see a list of items in a department (e.g., "show me all beauty products").
+    - The user asks "what items are in [category]?".
+
+    DO NOT USE THIS TOOL:
+    - To get details on a specific product (use get_product_by_name instead).
+    - If the user hasn't specified which category they are interested in.
     """
     if not isinstance(category, str) or not category.strip():
         return ErrorResponse(
@@ -171,10 +225,12 @@ def get_products_in_category(category: str) -> dict:
     products = get_products_by_category(category, limit=30)
     if not products:
         return CategoryProducts(category=category, items=[]).model_dump()
+
+    actual_category = products[0].get("category") or category
     items = []
     for p in products:
         items.append({"title": p.get("title"), "stock": p.get("stock")})
-    return {"category": category, "items": items}
+    return {"category": actual_category, "items": items}
 
 
 TOOLS = [
