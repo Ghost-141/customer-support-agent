@@ -13,6 +13,7 @@ def vectorize_tools():
     # Use the same embedding model as the graph_builder
     embeddings = OllamaEmbeddings(
         model=os.getenv("OLLAMA_EMBEDDING_MODEL", "embeddinggemma:300m"),
+        base_url=os.getenv("OLLAMA_BASE_URL"),
     )
 
     persist_directory = "./data/chroma_db"
